@@ -144,7 +144,6 @@ _INLINE_RE = re.compile(
     r'|\*\*(.+?)\*\*'
     r'|\*(.+?)\*'
     r'|\^(\d{1,3})'
-    r'|(?<=[.,;:!?\'\"\)])\s*(\d{1,3})(?=\s|$)'
     r')'
 )
 
@@ -156,8 +155,7 @@ def add_inline_runs(para, text, base_size_pt=11, base_font='Times New Roman'):
         if m.start() > last:
             style_run(para.add_run(text[last:m.start()]),
                       size_pt=base_size_pt, font=base_font)
-        bi, b, i, fn, fn2 = m.group(2), m.group(3), m.group(4), m.group(5), m.group(6)
-        fn = fn or fn2
+        bi, b, i, fn = m.group(2), m.group(3), m.group(4), m.group(5)
         if bi:
             style_run(para.add_run(bi), bold=True, italic=True,
                       size_pt=base_size_pt, font=base_font)
@@ -262,7 +260,7 @@ def build_body(doc, chapters, size_name):
             num  = para_data.get('number')
             text = para_data.get('text', '')
             if not text.strip(): continue
-            blocks = [b.strip() for b in text.split('\n\n') if b.strip()]
+            blocks = [b.strip() for b in re.split(r'\n[ \t]*\n', text) if b.strip()]
             for j, block in enumerate(blocks):
                 is_quote = block.startswith('>')
                 if is_quote:
@@ -337,8 +335,8 @@ def _fn_text_runs_xml(text, size_pt, font='Times New Roman'):
     for m in _INLINE_RE.finditer(text):
         if m.start() > last:
             runs.append(make_r(text[last:m.start()]))
-        bi, b, i, fn, fn2 = m.group(2), m.group(3), m.group(4), m.group(5), m.group(6)
-        fn_n = fn or fn2
+        bi, b, i, fn = m.group(2), m.group(3), m.group(4), m.group(5)
+        fn_n = fn
         if bi:   runs.append(make_r(bi, bold=True, italic=True))
         elif b:  runs.append(make_r(b,  bold=True))
         elif i:  runs.append(make_r(i,  italic=True))
@@ -423,8 +421,40 @@ def inject_footnotes(docx_path, footnotes, note_size_pt=8.5, font='Times New Rom
         idx = list(parent).index(r_elem)
         parent.remove(r_elem)
         parent.insert(idx, new_r)
+        # If this footnoteReference is the last run in the paragraph,
+        # append a 1pt space run at the very end so Word treats the line
+        # as finished and doesn't stretch it with justified alignment.
+        # We check ALL children of parent (not just idx+1 onwards) to
+        # correctly skip non-run elements (bookmarkEnd, proofErr, etc.)
+        # that may sit between the ref and the true end of the paragraph.
+        parent_children = list(parent)
+        runs_after = [c for c in parent_children
+                      if c.tag == _w('r') and parent_children.index(c) > idx]
+        if not runs_after:
+            trail_r = etree.Element(_w('r'))
+            trail_rPr = etree.SubElement(trail_r, _w('rPr'))
+            trail_sz = etree.SubElement(trail_rPr, _w('sz'))
+            trail_sz.set(_w('val'), '2')   # 1 pt — invisible
+            trail_szc = etree.SubElement(trail_rPr, _w('szCs'))
+            trail_szc.set(_w('val'), '2')
+            trail_t = etree.SubElement(trail_r, _w('t'))
+            trail_t.text = ' '
+            trail_t.set(_XML_SPACE, 'preserve')
+            parent.append(trail_r)   # append to end, after any bookmarkEnd/proofErr
         replaced += 1
     print(f"[Pass 2] {replaced} superscript runs → footnoteReference")
+
+    # Drop any footnotes that ended up with no reference in the document.
+    # Unreferenced footnotes cause Word repair errors (OOXML requires every
+    # footnote in footnotes.xml to be pointed to by a w:footnoteReference).
+    referenced_ids = {
+        int(ref.get(_w('id')))
+        for ref in doc_tree.findall(f'.//{_w("footnoteReference")}')
+    }
+    orphaned = set(fn_dict.keys()) - referenced_ids
+    if orphaned:
+        print(f"[Pass 2] Dropping {len(orphaned)} unreferenced footnote(s): {sorted(orphaned)}")
+        fn_dict = {k: v for k, v in fn_dict.items() if k in referenced_ids}
     files['word/document.xml'] = etree.tostring(
         doc_tree, xml_declaration=True, encoding='UTF-8', standalone=True)
 
@@ -454,7 +484,46 @@ def inject_footnotes(docx_path, footnotes, note_size_pt=8.5, font='Times New Rom
     files['[Content_Types].xml'] = etree.tostring(
         ct, xml_declaration=True, encoding='UTF-8', standalone=True)
 
-    # ── 5. Write patched zip ──────────────────────────────────────────────
+    # ── 5. Patch styles.xml — add FootnoteReference + FootnoteText if missing ─
+    sk = 'word/styles.xml'
+    st = etree.fromstring(files[sk])
+
+    def _style_exists(root, sid):
+        return any(
+            s.get(_w('styleId')) == sid
+            for s in root.findall(_w('style'))
+        )
+
+    if not _style_exists(st, 'FootnoteReference'):
+        s = etree.SubElement(st, _w('style'))
+        s.set(_w('type'), 'character'); s.set(_w('styleId'), 'FootnoteReference')
+        nm = etree.SubElement(s, _w('name')); nm.set(_w('val'), 'footnote reference')
+        bo = etree.SubElement(s, _w('basedOn')); bo.set(_w('val'), 'DefaultParagraphFont')
+        ui = etree.SubElement(s, _w('uiPriority')); ui.set(_w('val'), '99')
+        etree.SubElement(s, _w('semiHidden'))
+        etree.SubElement(s, _w('unhideWhenUsed'))
+        rpr = etree.SubElement(s, _w('rPr'))
+        va  = etree.SubElement(rpr, _w('vertAlign')); va.set(_w('val'), 'superscript')
+        print("[Pass 2] Added FootnoteReference character style")
+
+    if not _style_exists(st, 'FootnoteText'):
+        s = etree.SubElement(st, _w('style'))
+        s.set(_w('type'), 'paragraph'); s.set(_w('styleId'), 'FootnoteText')
+        nm = etree.SubElement(s, _w('name')); nm.set(_w('val'), 'footnote text')
+        bo = etree.SubElement(s, _w('basedOn')); bo.set(_w('val'), 'Normal')
+        ui = etree.SubElement(s, _w('uiPriority')); ui.set(_w('val'), '99')
+        etree.SubElement(s, _w('semiHidden'))
+        etree.SubElement(s, _w('unhideWhenUsed'))
+        ppr = etree.SubElement(s, _w('pPr'))
+        sp  = etree.SubElement(ppr, _w('spacing')); sp.set(_w('after'), '0')
+        rpr = etree.SubElement(s, _w('rPr'))
+        sz  = etree.SubElement(rpr, _w('sz'));   sz.set(_w('val'), '18')   # 9pt
+        szc = etree.SubElement(rpr, _w('szCs')); szc.set(_w('val'), '18')
+        print("[Pass 2] Added FootnoteText paragraph style")
+
+    files[sk] = etree.tostring(st, xml_declaration=True, encoding='UTF-8', standalone=True)
+
+    # ── 6. Write patched zip ──────────────────────────────────────────────
     tmp = docx_path + '.tmp_fn'
     with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:
         for name, data in files.items():
@@ -492,7 +561,8 @@ def build_booklet_docx(json_path, output_path, size_name='half-letter'):
     set_header_text(section.header, left_text=doc_title_short, right_text='')
     add_page_number_to_footer(section.footer)
 
-    # Pass 1    build_title_page(doc, data, size_name)
+    # Pass 1
+    build_title_page(doc, data, size_name)
     build_body(doc, data.get('chapters', []), size_name)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)

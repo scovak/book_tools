@@ -50,6 +50,16 @@ python compile_booklet.py <url> --output ~/Desktop/MyBooklet.docx
 ### 1. `vatican_fetch_content.py`
 Fetches the Vatican HTML and extracts a structured JSON file: chapters, paragraph numbers, body text, and footnotes. Vatican.va-specific.
 
+Automatically detects which of three Vatican page templates the URL uses and routes to the correct parser:
+
+| Template | URL pattern | Examples |
+|----------|-------------|---------|
+| `archive` | `/archive/hist_councils/...` | Vatican II constitutions, decrees, declarations |
+| `modern` | `/content/...` | Encyclicals, letters, homilies, Angelus addresses |
+| `toc` | `/roman_curia/...` | Index/TOC pages — returns a helpful error with chapter URLs |
+
+The `archive` template uses parenthetical `(N)` footnote references; these are automatically converted to inline superscript markers so the docx builder can wire them as native Word footnotes. The `modern` template uses numbered paragraphs with no chapter structure for short documents (letters, homilies, etc.).
+
 ### 2. `build_booklet_docx.py`
 Converts the JSON into a formatted `.docx`. Source-agnostic — works with any JSON following the schema (see below).
 
@@ -113,3 +123,4 @@ To use `build_booklet_docx.py` with a non-Vatican source, produce a JSON file in
 
 - `vatican_fetch_content.py` is specific to Vatican.va. Other sources need a custom extractor that outputs the JSON schema above.
 - Footnotes referenced within footnote text are not wired as native `<w:footnoteReference>` and appear inline instead.
+- Multi-page documents (e.g. the Compendium of Social Doctrine at `/roman_curia/`) are not supported as a single URL — pass each chapter URL individually or as multiple arguments to `compile_booklet.py`.

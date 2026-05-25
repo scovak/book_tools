@@ -191,7 +191,7 @@ def run_pipeline(
         combined_doc['title'] = ' & '.join(t for t in titles if t)
 
     # Write combined JSON for reference
-    combined_json = work_dir / Path(output_path).stem.replace('_booklet', '') + '_combined.json'
+    combined_json = work_dir / (Path(output_path).stem.replace('_booklet', '') + '_combined.json')
     if len(docs) > 1:
         with open(combined_json, 'w', encoding='utf-8') as f:
             json.dump(combined_doc, f, indent=2, ensure_ascii=False)
@@ -225,7 +225,7 @@ def _build_from_doc(doc: dict, output_path: str, page_size: str):
         tmp_path = f.name
 
     try:
-        build_booklet_docx(tmp_path, output_path)
+        build_booklet_docx(tmp_path, output_path, page_size)
     finally:
         os.unlink(tmp_path)
 
