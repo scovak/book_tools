@@ -523,6 +523,41 @@ def inject_footnotes(docx_path, footnotes, note_size_pt=8.5, font='Times New Rom
 
     files[sk] = etree.tostring(st, xml_declaration=True, encoding='UTF-8', standalone=True)
 
+
+    # ── 5b. Mirror same styles into stylesWithEffects.xml (Word 2010+) ───
+    swk = 'word/stylesWithEffects.xml'
+    if swk in files:
+        swe = etree.fromstring(files[swk])
+        swe_changed = False
+        if not _style_exists(swe, 'FootnoteReference'):
+            s = etree.SubElement(swe, _w('style'))
+            s.set(_w('type'), 'character'); s.set(_w('styleId'), 'FootnoteReference')
+            nm = etree.SubElement(s, _w('name')); nm.set(_w('val'), 'footnote reference')
+            bo = etree.SubElement(s, _w('basedOn')); bo.set(_w('val'), 'DefaultParagraphFont')
+            ui = etree.SubElement(s, _w('uiPriority')); ui.set(_w('val'), '99')
+            etree.SubElement(s, _w('semiHidden'))
+            etree.SubElement(s, _w('unhideWhenUsed'))
+            rpr = etree.SubElement(s, _w('rPr'))
+            va  = etree.SubElement(rpr, _w('vertAlign')); va.set(_w('val'), 'superscript')
+            swe_changed = True
+        if not _style_exists(swe, 'FootnoteText'):
+            s = etree.SubElement(swe, _w('style'))
+            s.set(_w('type'), 'paragraph'); s.set(_w('styleId'), 'FootnoteText')
+            nm = etree.SubElement(s, _w('name')); nm.set(_w('val'), 'footnote text')
+            bo = etree.SubElement(s, _w('basedOn')); bo.set(_w('val'), 'Normal')
+            ui = etree.SubElement(s, _w('uiPriority')); ui.set(_w('val'), '99')
+            etree.SubElement(s, _w('semiHidden'))
+            etree.SubElement(s, _w('unhideWhenUsed'))
+            ppr = etree.SubElement(s, _w('pPr'))
+            sp  = etree.SubElement(ppr, _w('spacing')); sp.set(_w('after'), '0')
+            rpr = etree.SubElement(s, _w('rPr'))
+            sz  = etree.SubElement(rpr, _w('sz'));   sz.set(_w('val'), '18')
+            szc = etree.SubElement(rpr, _w('szCs')); szc.set(_w('val'), '18')
+            swe_changed = True
+        if swe_changed:
+            files[swk] = etree.tostring(swe, xml_declaration=True, encoding='UTF-8', standalone=True)
+            print("[Pass 2] Mirrored footnote styles into stylesWithEffects.xml")
+
     # ── 6. Write patched zip ──────────────────────────────────────────────
     tmp = docx_path + '.tmp_fn'
     with zipfile.ZipFile(tmp, 'w', zipfile.ZIP_DEFLATED) as zout:

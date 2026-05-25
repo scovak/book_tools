@@ -101,7 +101,7 @@ def merge_documents(docs: list[dict]) -> dict:
             # Renumber footnotes and references in text
             offset_footnotes = {}
             for num, text in doc_footnotes.items():
-                offset_footnotes[num + footnote_offset] = text
+                offset_footnotes[int(num) + footnote_offset] = text
             # Update paragraph text references (superscript numbers)
             for ch in doc.get('chapters', []):
                 for para in ch.get('paragraphs', []):
@@ -109,7 +109,23 @@ def merge_documents(docs: list[dict]) -> dict:
                         para['text'] = offset_footnote_refs(para['text'], footnote_offset)
             combined['footnotes'].update(offset_footnotes)
         else:
-            combined['footnotes'].update(doc_footnotes)
+            combined['footnotes'].update({int(k): v for k, v in doc_footnotes.items()})
+
+        # Strip any body refs that fall outside this doc's allocated fn range.
+        # This catches overflow refs where parse_archive assigned more body
+        # positions than the doc has footnotes (e.g. LG body refs 345/346
+        # that belong to the next doc after global offset is applied).
+        if doc_footnotes:
+            doc_min = footnote_offset + 1
+            doc_max = footnote_offset + len(doc_footnotes)
+            for ch in doc.get('chapters', []):
+                for para in ch.get('paragraphs', []):
+                    if para.get('text') and '^' in para['text']:
+                        para['text'] = re.sub(
+                            r'\^(\d{1,3})',
+                            lambda m, lo=doc_min, hi=doc_max: m.group(0) if lo <= int(m.group(1)) <= hi else '',
+                            para['text']
+                        )
 
         combined['chapters'].extend(doc.get('chapters', []))
         footnote_offset += len(doc_footnotes)
@@ -118,13 +134,8 @@ def merge_documents(docs: list[dict]) -> dict:
 
 
 def offset_footnote_refs(text: str, offset: int) -> str:
-    """Shift all footnote reference numbers in a text block by `offset`."""
-    # This is a simple heuristic — bare numbers adjacent to punctuation
-    def replacer(m):
-        num = int(m.group(1))
-        return m.group(0).replace(m.group(1), str(num + offset))
-
-    return re.sub(r'(?<=[.,:;!?\'"])\s*(\d{1,3})(?=\s|$)', replacer, text)
+    """Shift all ^N footnote reference markers in a text block by `offset`."""
+    return re.sub(r'\^(\d{1,3})', lambda m: f'^{int(m.group(1)) + offset}', text)
 
 
 # ─── Main Pipeline ────────────────────────────────────────────────────────────

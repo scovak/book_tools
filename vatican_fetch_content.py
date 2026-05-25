@@ -153,9 +153,11 @@ def extract_text_from_html(html):
 # ── Archive-specific: (N) → ^N conversion ────────────────────────────────────
 
 def convert_archive_fn_refs(text):
-    """Convert archive-style (N) footnote refs to ^N superscript markers.
-    Only matches purely numeric parens like (1), not scripture refs like (1 John 1:2)."""
-    return re.sub(r'\((\d{1,3})\)', r'^\1', text)
+    """Convert archive-style (N) or [N] footnote refs to ^N superscript markers.
+    Only matches purely numeric parens/brackets, not scripture refs like (1 John 1:2)."""
+    text = re.sub(r'\((\d{1,3})\)', r'^\1', text)   # (N) style
+    text = re.sub(r'\[(\d{1,3})\]', r'^\1', text)   # [N] style (SC)
+    return text
 
 # ── Boundary Detection ────────────────────────────────────────────────────────
 
@@ -166,7 +168,7 @@ def find_content_boundaries(lines):
             end = i; break
     for i, line in enumerate(lines[:300]):
         clean = re.sub(r'[*_#\[\]]', '', line).strip().upper()
-        if any(dt in clean for dt in DOCUMENT_TYPES):
+        if any(clean.startswith(dt) or clean == dt for dt in DOCUMENT_TYPES):
             start = i; break
     if start == 0:
         for i, line in enumerate(lines[:300]):
@@ -353,8 +355,9 @@ def parse_footnotes(lines):
     local_max = 0       # highest local number seen in the current section
     chapter_offsets = [0]  # preamble section starts at offset 0
 
-    fn_start = re.compile(r'^\s*(\d{1,3})\.?\s*(.*)')
-    fn_start_caret = re.compile(r'^\^(\d{1,3})\s*(.*)')
+    fn_start         = re.compile(r'^\s*(\d{1,3})\.?\s+(.*)')   # "1. text" or "1 text"
+    fn_start_bracket = re.compile(r'^\s*\[(\d{1,3})\]\s*(.*)')  # "[1] text" (SC style)
+    fn_start_caret   = re.compile(r'^\^(\d{1,3})\s*(.*)')          # "^1text"  (modern)
     # Header lines within the notes block: "Chapter I:", "Preface Article 1:", etc.
     header_re = re.compile(
         r'^(?:Chapter|Preface|Article|Preamble|Prologue|Introduction|Part)\b',
@@ -378,7 +381,7 @@ def parse_footnotes(lines):
         if header_re.match(s_clean):
             continue
 
-        m = fn_start_caret.match(s) or fn_start.match(s)
+        m = fn_start_caret.match(s) or fn_start_bracket.match(s) or fn_start.match(s)
         if m:
             local_n = int(m.group(1))
             rest = m.group(2).strip()
@@ -460,42 +463,51 @@ def parse_archive(text, url=''):
     chapters = parse_chapters(body_lines[header_end:])
     footnotes, chapter_offsets = parse_footnotes(fn_lines)
 
-    # If footnotes use per-chapter restart numbering, patch ^N refs in body text
-    # so they match the globally-numbered footnotes dict.
-    #
-    # We can't rely on index-based alignment between `chapters` and
-    # `chapter_offsets` because the Preamble and Chapter I may share one
-    # footnote block while having separate chapter entries. Instead, detect
-    # the restart dynamically: when a chapter's first ref drops back to or
-    # below the highest ref seen so far, the source restarted numbering and
-    # we should advance to the next offset block.
-    if len(chapter_offsets) > 1:
-        block_idx = 0
-        highest_seen = 0
+    # Remap all body ^N refs to match the globally-sequential footnote keys.
+    # Walk every paragraph in document order; each ^N occurrence gets the next
+    # fn_key in sequence. After remapping, prune footnotes that were never
+    # referenced (their keys were skipped because the body had no marker for them).
+    if footnotes:
+        fn_keys = sorted(footnotes.keys())
+        counter = [0]
+
+        def _next_fn_key(m):
+            if counter[0] < len(fn_keys):
+                key = fn_keys[counter[0]]
+                counter[0] += 1
+                return f'^{key}'
+            return m.group(0)
 
         for chapter in chapters:
-            # Find the first and highest local footnote ref in this chapter
-            first_ref = None
-            max_ref = 0
             for para in chapter.get('paragraphs', []):
-                refs = [int(x) for x in re.findall(r'\^(\d{1,3})', para.get('text', ''))]
-                if refs:
-                    if first_ref is None:
-                        first_ref = min(refs)
-                    max_ref = max(max_ref, max(refs))
+                if para.get('text') and '^' in para['text']:
+                    para['text'] = re.sub(r'\^(\d{1,3})', _next_fn_key, para['text'])
 
-            # If the first ref drops back to or below what we've seen, it's a restart
-            if first_ref is not None:
-                if highest_seen > 0 and first_ref <= highest_seen:
-                    block_idx += 1
-                highest_seen = max(highest_seen, max_ref)
+        # After mapping, two cleanup steps:
+        #
+        # 1. Prune footnotes whose keys were never assigned (source HTML missing
+        #    inline marker). E.g. LG has footnote defs for 148 & 160 but no
+        #    inline ^N in the body. Those keys stay in fn_keys but no body ref
+        #    consumes them — counter[0] body refs were assigned, using
+        #    fn_keys[0..counter[0]-1]. Anything beyond that is unused.
+        used_keys = set(fn_keys[:counter[0]])
+        footnotes = {k: v for k, v in footnotes.items() if k in used_keys}
 
-            offset = chapter_offsets[block_idx] if block_idx < len(chapter_offsets) else 0
-            if offset == 0:
-                continue
-            for para in chapter.get('paragraphs', []):
-                if para.get('text'):
-                    para['text'] = _offset_fn_refs(para['text'], offset)
+        # 2. Strip any body refs that overflowed beyond fn_keys[-1].
+        #    This happens when the body has MORE ref occurrences than the
+        #    footnotes section defines (e.g. LG body has 302 positions but
+        #    only 300 valid keys after gaps). The mapper assigned the last 2
+        #    positions to keys belonging to the NEXT document. Strip them now.
+        if fn_keys:
+            max_valid = fn_keys[counter[0] - 1] if counter[0] > 0 else 0
+            for chapter in chapters:
+                for para in chapter.get('paragraphs', []):
+                    if para.get('text') and '^' in para['text']:
+                        para['text'] = re.sub(
+                            r'\^(\d{1,3})',
+                            lambda m: m.group(0) if int(m.group(1)) <= max_valid else '',
+                            para['text']
+                        )
 
     total_p = sum(len(ch.get('paragraphs',[])) for ch in chapters)
     print(f"  → {len(chapters)} chapters, {total_p} paragraphs, {len(footnotes)} footnotes")
