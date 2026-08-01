@@ -166,6 +166,8 @@ def run_volume(
         combined['author'] = manifest['author']
     if manifest.get('doc_type'):
         combined['doc_type'] = manifest['doc_type']
+    if manifest.get('toc', False):
+        combined['toc'] = True
 
     # Save combined JSON for reference
     combined_slug = slug_from_title(manifest.get('title', 'volume'))

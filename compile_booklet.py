@@ -15,7 +15,7 @@ OPTIONS:
     --size,   -s   Page size: half-letter | a5 | letter  (default: half-letter)
     --keep-json    Keep intermediate JSON files after building
     --json-only    Only run Step 1 (fetch+extract), skip docx build
-    --pdf-only     Only run Step 2 (build docx), requires existing JSON file(s)
+    --docx-only    Only run Step 2 (build docx), requires existing JSON file(s)
 
 EXAMPLES:
     # Single encyclical
@@ -146,8 +146,9 @@ def run_pipeline(
     page_size: str = 'half-letter',
     keep_json: bool = False,
     json_only: bool = False,
-    pdf_only: bool = False,
+    docx_only: bool = False,
     existing_jsons: list[str] = None,
+    toc: bool = False,
 ):
     work_dir = Path(output_path).parent
     work_dir.mkdir(parents=True, exist_ok=True)
@@ -155,7 +156,7 @@ def run_pipeline(
     json_paths = []
 
     # ── Step 1: Fetch & Extract ───────────────────────────────────────────────
-    if not pdf_only:
+    if not docx_only:
         for url in urls:
             slug = url_to_slug(url)
             json_path = work_dir / f"{slug}_extracted.json"
@@ -179,7 +180,7 @@ def run_pipeline(
             return json_paths
 
     else:
-        # pdf_only mode: use provided JSON files
+        # docx_only mode: use provided JSON files
         json_paths = existing_jsons or []
 
     # ── Step 2: Build PDF ─────────────────────────────────────────────────────
@@ -208,11 +209,13 @@ def run_pipeline(
             json.dump(combined_doc, f, indent=2, ensure_ascii=False)
 
     # Build PDF from in-memory combined doc
+    if toc:
+        combined_doc['toc'] = True
     _build_from_doc(combined_doc, output_path, page_size)
     print(f"\n[Step 2] ✓ Booklet saved to: {output_path}")
 
     # Cleanup JSON files unless --keep-json
-    if not keep_json and not pdf_only:
+    if not keep_json and not docx_only:
         for jp in json_paths:
             try:
                 Path(jp).unlink()
@@ -253,7 +256,7 @@ def main():
     parser.add_argument(
         'urls',
         nargs='+',
-        help='Vatican document URL(s). For --pdf-only, pass JSON file path(s) instead.'
+        help='Vatican document URL(s). For --docx-only, pass JSON file path(s) instead.'
     )
     parser.add_argument(
         '--output', '-o',
@@ -278,14 +281,19 @@ def main():
         help='Keep intermediate JSON file(s) after building'
     )
     parser.add_argument(
+        '--toc',
+        action='store_true',
+        help='Insert a Table of Contents page after the title page'
+    )
+    parser.add_argument(
         '--json-only',
         action='store_true',
         help='Only run Step 1 (fetch+extract), do not build PDF'
     )
     parser.add_argument(
-        '--pdf-only',
+        '--docx-only',
         action='store_true',
-        help='Only run Step 2 (build PDF from existing JSON files)'
+        help='Only run Step 2 (build docx from existing JSON files)'
     )
 
     args = parser.parse_args()
@@ -298,17 +306,17 @@ def main():
         else:
             args.output = "vatican_booklet.docx"
 
-    # Validate pdf_only mode
-    if args.pdf_only:
+    # Validate docx_only mode
+    if args.docx_only:
         for path in args.urls:
             if not Path(path).exists():
-                print(f"ERROR: File not found for --pdf-only mode: {path}")
+                print(f"ERROR: File not found for --docx-only mode: {path}")
                 sys.exit(1)
         run_pipeline(
             urls=[],
             output_path=args.output,
             page_size=args.size,
-            pdf_only=True,
+            docx_only=True,
             existing_jsons=args.urls,
         )
     else:
@@ -318,6 +326,7 @@ def main():
             page_size=args.size,
             keep_json=args.keep_json,
             json_only=args.json_only,
+            toc=args.toc,
         )
 
 

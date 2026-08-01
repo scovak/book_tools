@@ -179,7 +179,11 @@ def find_content_boundaries(lines):
 def find_content_boundaries_modern(lines):
     start, end = 0, len(lines)
     for i, line in enumerate(lines):
+        s = line.strip() 
         if re.search(r'Copyright\s*©', line, re.IGNORECASE):
+            end = i; break
+        # Vatican navigation/language-switcher lines (e.g. /TESTO, /IT, /EN)
+        if re.match(r'^/[A-Z]{2,6}$', s):
             end = i; break
     for i, line in enumerate(lines[:200]):
         s = line.strip()
@@ -205,8 +209,14 @@ def find_footnote_boundary(lines):
         if re.match(r'^\s*\d+\.\s+\S', line):
             last_para = i
     fn_re = re.compile(r'^\s*(\d{1,3})\s*([A-Za-z\*"\(]|Cf\.|Ibid\.)')
+    fn_re_bold = re.compile(r'^\s*\*\*(\d{1,3})\*\*\.?\s*\S')
+    fn_re_bracket = re.compile(r'^\[(\d{1,3})\]\s*\S')
     for i in range(last_para, len(lines)):
         s = lines[i].strip()
+        if fn_re_bracket.match(s):
+            return i
+        if fn_re_bold.match(s):
+            return i
         if fn_re.match(s) and not re.match(r'^\d+\.\s', s):
             return i
     return len(lines)
@@ -238,9 +248,9 @@ def _classify_header_line(line, meta):
     if re.search(r'\b(POPE|JOHN PAUL|BENEDICT XVI|FRANCIS|PIUS XII|LEO XIII|GREGORY|CLEMENT|INNOCENT|URBAN)\b', cup):
         if not meta['author']:
             meta['author'] = clean.strip(); return
-    if re.match(r'^TO\s+(THE|ALL|BISHOPS|PRIESTS|DEACONS|FAITHFUL)', cup):
+    if re.match(r'^TO\s+(THE|ALL|HIS|HER|OUR|BISHOPS|PRIESTS|DEACONS|FAITHFUL)', cup):
         meta['addressees'].append(clean.strip()); return
-    if meta['addressees'] and re.match(r'^(BISHOPS|PRIESTS|DEACONS|MEN AND WOMEN|ALL THE|IN THE|AND ALL|CONSECRATED)', cup):
+    if meta['addressees'] and re.match(r'^(BISHOPS|PRIESTS|DEACONS|MEN AND WOMEN|ALL THE|IN THE|AND ALL|CONSECRATED|THE PRIESTS|THE RELIGIOUS|THE SONS|THE DAUGHTERS|THE FAITHFUL|THE LAITY)', cup):
         meta['addressees'].append(clean.strip()); return
     if re.match(r'^ON\s+', cup) or re.match(r'^CONCERNING\s+', cup):
         meta['subject'] = clean.strip(); return
@@ -249,7 +259,11 @@ def _classify_header_line(line, meta):
         candidate = bi_match.group(1).strip()
         if not meta['latin_title'] and len(candidate) > 3:
             meta['latin_title'] = candidate; return
-    if not meta['title'] and len(clean) > 5 and clean != meta['doc_type']:
+    _SKIP_TITLE = re.compile(
+        r'^(SUPREME PONTIFF|SERVANT OF THE SERVANTS OF GOD|BISHOP OF ROME|'
+        r'VICAR OF CHRIST|TO|FOR|GREETINGS)$', re.IGNORECASE
+    )
+    if not meta['title'] and len(clean) > 5 and clean != meta['doc_type'] and not _SKIP_TITLE.match(clean):
         meta['title'] = clean
 
 # ── Chapter & Paragraph Parsers ───────────────────────────────────────────────
@@ -273,11 +287,33 @@ def parse_chapters(body_lines):
                 current['title'] = f"Chapter {current['number']}: {sub}"
         subtitle_buf = None
 
+    pending_chapter = None  # holds 'CHAPTER' when seen alone on a line
+
     for line in body_lines:
         s = line.strip()
         # Strip bold/italic markers before testing chapter patterns
         # (Vatican II archive pages wrap headings in **bold**)
         s_clean = re.sub(r'\*+', '', s).strip()
+
+        # If previous line was bare 'CHAPTER', combine with this line
+        if pending_chapter is not None:
+            if s_clean:
+                s_clean = pending_chapter + ' ' + s_clean
+                s = s_clean
+            pending_chapter = None
+
+        # Bare 'CHAPTER' on its own line — wait for next line with numeral
+        if re.match(r'^CHAPTER$', s_clean, re.IGNORECASE):
+            pending_chapter = 'CHAPTER'
+            continue
+
+        m = re.match(
+            r'^CHAPTER\s+(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|'
+            r'I{1,3}|IV|VI{0,3}|IX|X{1,3}|\d+)(?:\s+.*)?$', s_clean, re.IGNORECASE
+        )
+        if m:
+            # Extract just the numeral part (group 1), ignore trailing title on same line
+            pass  # fall through to existing handler below using s_clean
         m = re.match(
             r'^CHAPTER\s+(ONE|TWO|THREE|FOUR|FIVE|SIX|SEVEN|EIGHT|NINE|TEN|'
             r'I{1,3}|IV|VI{0,3}|IX|X{1,3}|\d+)$', s_clean, re.IGNORECASE
@@ -305,7 +341,27 @@ def parse_chapters(body_lines):
             else:
                 finalize_subtitle()
 
-        sect_m = re.match(r'^\*\*\s*(INTRODUCTION|CONCLUSION|EPILOGUE|PROLOGUE|PREFACE)\s*\*\*$', s, re.IGNORECASE)
+        # Roman numeral part headings: **I. TITLE** — common in encyclicals
+        roman_m = re.match(
+            r'^\*\*(I{1,3}|IV|VI{0,3}|IX|X{1,3})\.\s+(.+?)\*\*$',
+            s, re.IGNORECASE
+        )
+        if roman_m:
+            finalize_subtitle()
+            flush()
+            word = roman_m.group(1).upper()
+            num = CHAPTER_WORDS.get(word, len(chapters) + 1)
+            subtitle_text = roman_m.group(2).strip()
+            current = {
+                'number': num,
+                'title': f'{word}. {subtitle_text}',
+                'subtitle': subtitle_text,
+                '_raw': '',
+            }
+            subtitle_buf = None
+            continue
+
+        sect_m = re.match(r'^\*\*\s*(INTRODUCTION|CONCLUSION|EPILOGUE|PROLOGUE|PREFACE|APPENDIX|APPENDICES|DECLARATION|PREAMBLE)\s*\*\*$', s, re.IGNORECASE)
         if sect_m:
             finalize_subtitle()
             flush()
@@ -324,6 +380,9 @@ def parse_chapters(body_lines):
     return chapters
 
 def parse_paragraphs(text):
+    # Normalize bold/bold-italic formatted paragraph numbers at line starts (modern Vatican CMS):
+    # "**1.**" → "1."   "**1. Title**" → "1. Title..."  "***1. Title***" → "1. Title..."
+    text = re.sub(r'(?m)^\*{2,3}(\d+\.)', r'\1', text)
     matches = list(re.finditer(r'(?m)^(\d+)\.\s+', text))
     if not matches:
         c = clean_text(text)
@@ -356,6 +415,7 @@ def parse_footnotes(lines):
     chapter_offsets = [0]  # preamble section starts at offset 0
 
     fn_start         = re.compile(r'^\s*(\d{1,3})\.?\s+(.*)')   # "1. text" or "1 text"
+    fn_start_bold = re.compile(r'^\s*\*\*(\d{1,3})\*\*\.?\s*(.*)') # "**1**. text" or "**1** text" (archive bold style)
     fn_start_bracket = re.compile(r'^\s*\[(\d{1,3})\]\s*(.*)')  # "[1] text" (SC style)
     fn_start_caret   = re.compile(r'^\^(\d{1,3})\s*(.*)')          # "^1text"  (modern)
     # Header lines within the notes block: "Chapter I:", "Preface Article 1:", etc.
@@ -381,7 +441,7 @@ def parse_footnotes(lines):
         if header_re.match(s_clean):
             continue
 
-        m = fn_start_caret.match(s) or fn_start_bracket.match(s) or fn_start.match(s)
+        m = fn_start_caret.match(s) or fn_start_bracket.match(s) or fn_start_bold.match(s) or fn_start.match(s)
         if m:
             local_n = int(m.group(1))
             rest = m.group(2).strip()
@@ -440,9 +500,6 @@ def parse_archive(text, url=''):
 
     # Convert (N) refs in body only
     body_text  = convert_archive_fn_refs('\n'.join(body_lines))
-    # TEMP DEBUG
-    with open('debug_body.txt', 'w', encoding='utf-8') as _f:
-        _f.write(body_text)
     body_lines = body_text.split('\n')
 
     _CHAPTER_RE = re.compile(
@@ -520,13 +577,42 @@ def parse_modern(text, url=''):
     start, end = find_content_boundaries_modern(lines)
     content_lines = lines[start:end]
     fn_boundary = find_footnote_boundary(content_lines)
-    body_lines  = content_lines[:fn_boundary]
-    fn_lines    = content_lines[fn_boundary:]
+    if fn_boundary < len(content_lines):
+        # Footnotes found within body (before copyright)
+        body_lines = content_lines[:fn_boundary]
+        fn_lines   = content_lines[fn_boundary:]
+    else:
+        # Footnotes are after the copyright line — search lines[end:]
+        body_lines = content_lines
+        fn_lines   = lines[end:]
+
+    # Convert [N] / (N) bracket refs to ^N so footnote refs survive into the body
+    body_text  = convert_archive_fn_refs('\n'.join(body_lines))
+    body_lines = body_text.split('\n')
 
     header_end = 0
+    found_latin_title = False
     for i, line in enumerate(body_lines):
-        if re.match(r'^\s*\d+\.\s+\S', line):
+        s = line.strip()
+        # Numbered paragraph: "1. Text..." or bold "**1.**" / "**1. title**"
+        if re.match(r'^\s*\d+\.\s+\S', s) or re.match(r'^\*\*\d+\.', s):
             header_end = i; break
+        # Roman numeral section heading: **I. TITLE** — body starts here
+        if re.match(r'^\*\*[IVX]+\.', s):
+            header_end = i; break
+        # Bold-italic line: first one is the latin title (part of header);
+        # any subsequent ***...*** is a section subheading — body starts there
+        if re.match(r'^\*\*\*', s):
+            if not found_latin_title:
+                found_latin_title = True
+                header_end = i + 1  # include latin-title line; keep scanning
+            else:
+                header_end = i; break
+        else:
+            # Non-break line — advance header_end to include it if we're past
+            # the latin title (catching addressee lines that follow)
+            if found_latin_title:
+                header_end = i + 1
 
     print(f"  Parsing modern structure...")
     meta = parse_header(body_lines[:header_end])

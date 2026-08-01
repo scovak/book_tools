@@ -177,6 +177,114 @@ def add_inline_runs(para, text, base_size_pt=11, base_font='Times New Roman'):
 
 
 # ---------------------------------------------------------------------------
+# Section-break helper — ends a section with footnote restart
+# ---------------------------------------------------------------------------
+
+def _add_section_break_paragraph(doc, size_name):
+    """Insert an empty paragraph whose sectPr ends the current Word section
+    on a next page and restarts footnote numbering from 1."""
+    w_in, h_in = PAGE_SIZES[size_name]
+    m = MARGINS[size_name]
+
+    p = doc.add_paragraph()
+    r = p.add_run()
+    r.font.size = Pt(1)
+    para_spacing(p, before_pt=0, after_pt=0)
+
+    pPr = p._p.get_or_add_pPr()
+    sectPr = OxmlElement('w:sectPr')
+
+    typ = OxmlElement('w:type')
+    typ.set(qn('w:val'), 'nextPage')
+    sectPr.append(typ)
+
+    pgSz = OxmlElement('w:pgSz')
+    pgSz.set(qn('w:w'), str(int(w_in * 1440)))
+    pgSz.set(qn('w:h'), str(int(h_in * 1440)))
+    sectPr.append(pgSz)
+
+    pgMar = OxmlElement('w:pgMar')
+    pgMar.set(qn('w:top'),    str(int(m['top']    * 1440)))
+    pgMar.set(qn('w:bottom'), str(int(m['bottom'] * 1440)))
+    pgMar.set(qn('w:left'),   str(int(m['inner']  * 1440)))
+    pgMar.set(qn('w:right'),  str(int(m['outer']  * 1440)))
+    pgMar.set(qn('w:gutter'), '0')
+    pgMar.set(qn('w:header'), str(int(m['header'] * 1440)))
+    pgMar.set(qn('w:footer'), str(int(m['footer'] * 1440)))
+    sectPr.append(pgMar)
+
+    fnPr = OxmlElement('w:footnotePr')
+    numRestart = OxmlElement('w:numRestart')
+    numRestart.set(qn('w:val'), 'eachSect')
+    fnPr.append(numRestart)
+    sectPr.append(fnPr)
+
+    pPr.append(sectPr)
+
+# ---------------------------------------------------------------------------
+# TOC builder — inserts a native Word TOC field
+# ---------------------------------------------------------------------------
+
+def build_toc(doc, size_name='half-letter'):
+    """Insert a Table of Contents page using Word's TOC field.
+    Uses Heading 1 (doc titles) and Heading 2 (chapter titles).
+    Word will populate page numbers when the user opens the file.
+    """
+    is_small = size_name != 'letter'
+    toc_title_pt = 13 if is_small else 14
+
+    # TOC heading
+    p = doc.add_paragraph()
+    p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    r = p.add_run('CONTENTS')
+    r.font.name = 'Times New Roman'
+    r.font.size = Pt(toc_title_pt)
+    r.bold = True
+    para_spacing(p, before_pt=6, after_pt=14)
+
+    # Insert the TOC field (\1-2 = levels 1 and 2)
+    toc_para = doc.add_paragraph()
+    toc_para.alignment = WD_ALIGN_PARAGRAPH.LEFT
+    para_spacing(toc_para, before_pt=0, after_pt=0)
+    run = toc_para.add_run()
+
+    # Build the field XML
+    fld_char_begin = OxmlElement('w:fldChar')
+    fld_char_begin.set(qn('w:fldCharType'), 'begin')
+    fld_char_begin.set(qn('w:dirty'), 'true')
+
+    instr = OxmlElement('w:instrText')
+    instr.set(qn('xml:space'), 'preserve')
+    instr.text = ' TOC \\o "1-2" \\h \\z \\u '
+
+    fld_char_sep = OxmlElement('w:fldChar')
+    fld_char_sep.set(qn('w:fldCharType'), 'separate')
+
+    fld_text = OxmlElement('w:t')
+    fld_text.text = '[Right-click → Update Field to generate TOC]'
+
+    fld_run_text = OxmlElement('w:r')
+    rpr = OxmlElement('w:rPr')
+    color = OxmlElement('w:color')
+    color.set(qn('w:val'), '999999')
+    rpr.append(color)
+    fld_run_text.append(rpr)
+    fld_run_text.append(fld_text)
+
+    fld_char_end = OxmlElement('w:fldChar')
+    fld_char_end.set(qn('w:fldCharType'), 'end')
+
+    run._r.append(fld_char_begin)
+    run._r.append(instr)
+    run._r.append(fld_char_sep)
+    toc_para._p.append(fld_run_text)
+    run2 = toc_para.add_run()
+    run2._r.append(fld_char_end)
+
+    doc.add_page_break()
+
+
+# ---------------------------------------------------------------------------
 # Pass 1 document builders
 # ---------------------------------------------------------------------------
 
@@ -245,16 +353,24 @@ def build_body(doc, chapters, size_name):
                 p.runs[0].font.name = 'Times New Roman'; p.runs[0].font.size = Pt(9)
                 p.runs[0].font.color.rgb = RGBColor(0x66, 0x66, 0x66)
                 para_spacing(p, before_pt=18, after_pt=2); para_keep_with_next(p)
-                p2 = doc.add_paragraph()
+                p2 = doc.add_paragraph(style='Heading 2')
                 p2.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 r = p2.add_run(subtitle or title)
                 r.font.name = 'Times New Roman'; r.font.size = Pt(ch_pt); r.bold = True
+                r.font.color.rgb = RGBColor(0, 0, 0)
                 para_spacing(p2, before_pt=0, after_pt=14); para_keep_with_next(p2)
             else:
-                p = doc.add_paragraph()
+                # Document divider or unnumbered section — use Heading 1 for doc titles,
+                # Heading 2 for preamble/intro sections
+                is_doc_title = chapter.get('_is_doc_divider', False)
+                if is_doc_title:
+                    _add_section_break_paragraph(doc, size_name)
+                heading_style = 'Heading 1' if is_doc_title else 'Heading 2'
+                p = doc.add_paragraph(style=heading_style)
                 p.alignment = WD_ALIGN_PARAGRAPH.CENTER
                 r = p.add_run(title.upper())
                 r.font.name = 'Times New Roman'; r.font.size = Pt(ch_pt - 1); r.bold = True
+                r.font.color.rgb = RGBColor(0, 0, 0)
                 para_spacing(p, before_pt=14, after_pt=10); para_keep_with_next(p)
         for para_data in paras:
             num  = para_data.get('number')
@@ -298,6 +414,25 @@ def build_body(doc, chapters, size_name):
                         para_spacing(p, before_pt=8 if prev_empty else 0, after_pt=2)
                         prev_empty = False
                     continue
+                # Detect **SECTION N / Title** subsection headings
+                # (used in GS Part II chapters)
+                sect_m = re.match(
+                    r'^\*\*\s*SECTION\s*?\s*(\d+)\s*?\s*(.+?)\s*\*\*$',
+                    block, re.IGNORECASE | re.DOTALL
+                )
+                if sect_m:
+                    sect_title = sect_m.group(2).strip()
+                    p = doc.add_paragraph()
+                    p.alignment = WD_ALIGN_PARAGRAPH.LEFT
+                    r = p.add_run(f'Section {sect_m.group(1)}: {sect_title}')
+                    r.font.name = 'Times New Roman'
+                    r.font.size = Pt(body_pt)
+                    r.bold = True
+                    r.italic = True
+                    para_spacing(p, before_pt=10, after_pt=4)
+                    para_keep_with_next(p)
+                    continue
+
                 p = doc.add_paragraph()
                 p.alignment = WD_ALIGN_PARAGRAPH.LEFT if is_quote else WD_ALIGN_PARAGRAPH.JUSTIFY
                 if j == 0 and num is not None:
@@ -598,7 +733,22 @@ def build_booklet_docx(json_path, output_path, size_name='half-letter'):
 
     # Pass 1
     build_title_page(doc, data, size_name)
-    build_body(doc, data.get('chapters', []), size_name)
+    if data.get('toc', False):
+        build_toc(doc, size_name)
+    chapters = data.get('chapters', [])
+    build_body(doc, chapters, size_name)
+
+    # Add footnotePr/numRestart to final sectPr for last document in volume
+    if any(ch.get('_is_doc_divider') for ch in chapters):
+        final_sectPr = doc.sections[0]._sectPr
+        fn_pr = final_sectPr.find(qn('w:footnotePr'))
+        if fn_pr is None:
+            fn_pr = OxmlElement('w:footnotePr')
+            final_sectPr.append(fn_pr)
+        if fn_pr.find(qn('w:numRestart')) is None:
+            num_restart = OxmlElement('w:numRestart')
+            num_restart.set(qn('w:val'), 'eachSect')
+            fn_pr.append(num_restart)
 
     Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     doc.save(output_path)
